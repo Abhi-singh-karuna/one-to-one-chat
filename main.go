@@ -2,73 +2,100 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/gin-gonic/gin"
-	"github.com/googollee/go-socket.io"
-	"log"
+
+	socketio "github.com/googollee/go-socket.io"
 )
+
+type Messaage struct {
+	SenderID  string `json:"sender_id"`
+	ReciverID string `json:"reciver_id"`
+	Text      string `json:"text"`
+}
 
 type Msg struct {
 	UserId    string   `json:"user_id"`
 	Text      string   `json:"text"`
-	State     string   `json:"state"`
-	NameSpace string   `json:"name_space"`
 	Rooms     []string `json:"rooms"`
-}
-
-type Connect struct {
-	UserId string   `json:"user_id"`
-	Text   string   `json:"text"`
-	Rooms  []string `json:"rooms"`
 }
 
 func main() {
 	router := gin.New()
-
 	server := socketio.NewServer(nil)
 
+	var users = make(map[string]interface{})
+
 	server.OnConnect("/", func(s socketio.Conn) error {
-		msg := Msg{
-			UserId: s.ID(),
-			Text:   "on connect",
-		}
 		s.SetContext("")
-		s.Emit("connection", msg)
-		fmt.Println("connected : ", s.ID())
+		fmt.Println("connected:", s.ID())
+		s.Emit("allconectedusers", users)
+		// s.Join("bcast")
 		return nil
 	})
 
+	server.OnEvent("/", "username", func(s socketio.Conn, name string) {
+		fmt.Println("new-users:", name)
+		users[s.ID()] = name
+		// s.Join("bcast")
+		s.Emit("newuser", users[s.ID()])
+		fmt.Println("allconectedusers : ", users)
+		for key, _ := range users {
+			server.BroadcastToRoom("/", key, "allconectedusers", users)
+		}
+	})
+
+	server.OnEvent("/", "chat", func(s socketio.Conn, res Messaage) {
+		res.SenderID = s.ID()
+		s.SetContext(res)
+		// fmt.Println("chat received", res, s.Namespace(), s.Rooms(), s.Rooms())
+		fmt.Println("send to  ID:  " ,res.ReciverID+" from  ID :"+ s.ID()+"  message  :"+res.Text)
+		var x string = res.ReciverID
+		server.BroadcastToRoom("/", x, "message", res)
+	})
+
+	server.OnDisconnect("/", func(s socketio.Conn, msg string) {
+		fmt.Println("disconnected:", users[s.ID()])
+		s.Emit("disconnecteduser", users[s.ID()])
+		delete(users, s.ID())
+		for key, _ := range users {
+			fmt.Println("key : ", key)
+			server.BroadcastToRoom("/", key, "allconectedusers", users)
+		}
+		fmt.Println("closed", msg)
+	})
+
+	/// chat in room
+
 	server.OnEvent("/", "join", func(s socketio.Conn, room string) {
 		s.Join(room)
+		fmt.Println("join     :    ", room)
 		x := s.Rooms()
 		msg := Msg{
 			s.ID(),
 			" join " + room,
-			"state",
-			s.Namespace(),
 			x,
+
 		}
 		fmt.Println("join", room, s.Namespace(), s.Rooms())
-		server.BroadcastToRoom("/", room, "res", msg)
+		server.BroadcastToRoom("/", room, "join_room", msg)
 	})
 
 	server.OnEvent("/", "leave", func(s socketio.Conn, room string) {
 		s.Leave(room)
 		msg := Msg{
 			s.ID(),
-			" leave " + room, "state",
-			s.Namespace(),
+			" leave " + room,
 			s.Rooms(),
 		}
-		fmt.Println("/:leave ", room, s.Namespace(), s.Rooms())
-		server.BroadcastToRoom("/", room, "res", msg)
+		fmt.Println("leave", room, s.Namespace(), s.Rooms())
+		server.BroadcastToRoom("/", room, "leave_from_room", msg)
 	})
 
-	server.OnEvent("/", "chat", func(s socketio.Conn, msg string) {
+	server.OnEvent("/", "chatingroup", func(s socketio.Conn, msg string) {
 		res := Msg{
 			s.ID(),
 			msg,
-			"normal",
-			s.Namespace(),
 			s.Rooms(),
 		}
 
@@ -81,50 +108,17 @@ func main() {
 		if len(rooms) > 0 {
 			fmt.Println("broadcast to ", rooms)
 			for i := range rooms {
-				server.BroadcastToRoom("/", rooms[i], "res", res)
+				server.BroadcastToRoom("/", rooms[i], "chat_in_group", res)
 			}
 		}
 	})
 
-	server.OnEvent("/", "notice", func(s socketio.Conn, msg string) {
-		fmt.Println("notice", msg)
-		s.Emit("reply", "have "+msg)
-	})
+	/// ---- 
 
-	server.OnEvent("/chat", "msg", func(s socketio.Conn, msg string) string {
-		fmt.Println("/chat:msg received", msg)
-		return "recv" + msg
-	})
 
-	server.OnEvent("/", "bye", func(s socketio.Conn, msg string) string {
-		last := s.Context().(Msg)
-		s.Emit("bye", last)
-		res := Msg{s.ID(), s.ID() + " leave", "state", s.Namespace(), s.Rooms()}
-		rooms := s.Rooms()
-		s.LeaveAll()
-		s.Close()
-		if len(rooms) > 0 {
-			fmt.Println("broadcast to ", rooms)
-			for i := range rooms {
-				server.BroadcastToRoom("/", rooms[i], "res", res)
-			}
-		}
-		fmt.Printf("/:bye last context: %+v \n", last)
-		return last.Text
-	})
-
-	server.OnError("/", func(s socketio.Conn, err error) {
-		fmt.Println("/:error", err)
-	})
-
-	server.OnDisconnect("/", func(s socketio.Conn, reason string) {
-		fmt.Println("/:closed", s.ID(), reason)
-	})
 
 	go server.Serve()
 	defer server.Close()
-
-	log.Println("Severing at localhost:5000...")
 
 	router.GET("/socket.io/*any", gin.WrapH(server))
 	router.POST("/socket.io/*any", gin.WrapH(server))
